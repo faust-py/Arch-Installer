@@ -1,0 +1,293 @@
+#!/bin/sh
+set -e
+
+# ── Colors ─────────────────────────────────────────────
+Green='\033[0;32m'
+Cyan='\033[1;36m'
+Red='\033[0;31m'
+Yellow='\033[1;33m'
+No='\033[0m'
+
+# ── Helpers ─────────────────────────────────────────────
+die()  { echo -e "${Red}[ERROR] $*${No}" >&2; exit 1; }
+info() { echo -e "${Cyan}[*] $*${No}"; }
+ok()   { echo -e "${Green}[✓] $*${No}"; }
+warn() { echo -e "${Yellow}[!] $*${No}"; }
+
+ask() {
+    local prompt="$1" var="$2" default="$3"
+    while true; do
+        printf "%b[+]→ %s%b" "${Cyan}" "$prompt" "${No}"
+        [ -n "$default" ] && printf " [%s]" "$default"
+        printf ": "
+        read -r "$var"
+        eval "val=\$$var"
+        [ -z "$val" ] && [ -n "$default" ] && eval "$var=\"$default\""
+        eval "val=\$$var"
+        [ -n "$val" ] && break
+        warn "This field cannot be empty."
+    done
+}
+
+# ── Banner ──────────────────────────────────────────────
+clear
+cat << "EOF"
+░█████╗░██████╗░░█████╗░██╗░░██╗
+██╔══██╗██╔══██╗██╔══██╗██║░░██║
+███████║██████╔╝██║░░╚═╝███████║
+██╔══██║██╔══██╗██║░░██╗██╔══██║
+██║░░██║██║░░██║╚█████╔╝██║░░██║
+╚═╝░░╚═╝╚═╝░░╚═╝░╚════╝░╚═╝░░╚═╝
+
+██╗███╗░░██╗░██████╗████████╗░█████╗░██╗░░░░░██╗░░░░░███████╗██████╗░
+██║████╗░██║██╔════╝╚══██╔══╝██╔══██╗██║░░░░░██║░░░░░██╔════╝██╔══██╗
+██║██╔██╗██║╚█████╗░░░░██║░░░███████║██║░░░░░██║░░░░░█████╗░░██████╔╝
+██║██║╚████║░╚═══██╗░░░██║░░░██╔══██║██║░░░░░██║░░░░░██╔══╝░░██╔══██╗
+██║██║░╚███║██████╔╝░░░██║░░░██║░░██║███████╗███████╗███████╗██║░░██║
+╚═╝╚═╝░░╚══╝╚═════╝░░░░╚═╝░░░╚═╝░░╚═╝╚══════╝╚══════╝╚══════╝╚═╝░░╚═╝
+EOF
+
+# ════════════════════════════════════════════════════════
+#  PART 1 — live environment setup & base install
+# ════════════════════════════════════════════════════════
+info "Updating keyring..."
+pacman --noconfirm -Syy archlinux-keyring || die "Failed to update keyring."
+loadkeys fr
+timedatectl set-ntp true
+clear
+
+# ── Drive selection ──────────────────────────────────────
+lsblk
+ask "Enter the drive to install on (e.g., /dev/sda)" drive
+[ -b "$drive" ] || die "'$drive' is not a valid block device."
+
+warn "ALL DATA ON $drive WILL BE DESTROYED. Type 'yes' to confirm."
+read -r confirm
+[ "$confirm" = "yes" ] || die "Aborted by user."
+
+# ── Partitioning ─────────────────────────────────────────
+info "Launching cfdisk — create: EFI (512M, type EFI System), Linux root (rest, type Linux filesystem)"
+cfdisk "$drive"
+clear
+lsblk
+
+ask "Enter the EFI partition (e.g., ${drive}1)" efipart
+[ -b "$efipart" ] || die "'$efipart' is not a valid partition."
+
+ask "Enter the Linux root partition (e.g., ${drive}2)" linuxpart
+[ -b "$linuxpart" ] || die "'$linuxpart' is not a valid partition."
+
+[ "$efipart" = "$linuxpart" ] && die "EFI and root cannot be the same partition."
+
+# ── Format ───────────────────────────────────────────────
+info "Formatting partitions..."
+mkfs.fat -F32 "$efipart"   || die "Failed to format EFI partition."
+mkfs.btrfs -f "$linuxpart" || die "Failed to format root partition."
+
+# ── Mounting  ──────────────────────────────────────
+info "Creating btrfs and efi ..."
+# Linux :
+mount "$linuxpart" /mnt
+btrfs subvolume create /mnt/@
+umount /mnt
+BTRFS_OPTS="noatime,compress=zstd,space_cache=v2"
+mount -o "${BTRFS_OPTS},subvol=@"          "$linuxpart" /mnt
+# EFI :
+mkdir -p /mnt/boot/efi
+mount "$efipart" /mnt/boot/efi
+ok "Partitions mounted."
+
+# ── Base install ──────────────────────────────────────────
+info "Installing base packages (this may take a while)..."
+pacstrap /mnt \
+    base base-devel \
+    linux-zen linux-zen-headers linux-firmware \
+    vim nano \
+    amd-ucode \
+    || die "pacstrap failed."
+
+genfstab -U /mnt >> /mnt/etc/fstab
+ok "Base installation done."
+
+# ── Hand off to chroot ────────────────────────────────────
+SCRIPT_PATH="$(readlink -f "$0")"
+sed '1,/^#part2$/d' "$SCRIPT_PATH" > /mnt/arch_install2.sh
+chmod +x /mnt/arch_install2.sh
+arch-chroot /mnt /arch_install2.sh
+rm -f /mnt/arch_install2.sh
+ok "All done! You may now reboot."
+exit 0
+
+# ════════════════════════════════════════════════════════
+#  PART 2 — chroot: system config, bootloader, user
+# ════════════════════════════════════════════════════════
+#part2
+set -e
+
+Green='\033[0;32m'
+Cyan='\033[1;36m'
+Red='\033[0;31m'
+Yellow='\033[1;33m'
+No='\033[0m'
+
+die()  { echo -e "${Red}[ERROR] $*${No}" >&2; exit 1; }
+info() { echo -e "${Cyan}[*] $*${No}"; }
+ok()   { echo -e "${Green}[✓] $*${No}"; }
+warn() { echo -e "${Yellow}[!] $*${No}"; }
+
+ask() {
+    local prompt="$1" var="$2" default="$3"
+    while true; do
+        printf "%b[+]→ %s%b" "${Cyan}" "$prompt" "${No}"
+        [ -n "$default" ] && printf " [%s]" "$default"
+        printf ": "
+        read -r "$var"
+        eval "val=\$$var"
+        [ -z "$val" ] && [ -n "$default" ] && eval "$var=\"$default\""
+        eval "val=\$$var"
+        [ -n "$val" ] && break
+        echo "This field cannot be empty."
+    done
+}
+
+# ── pacman tweaks ─────────────────────────────────────────
+info "Configuring pacman..."
+sed -i 's/^#\(Color\)/\1/'               /etc/pacman.conf
+sed -i 's/^#\(VerbosePkgLists\)/\1/'    /etc/pacman.conf
+sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 5/' /etc/pacman.conf
+sed -i '/\[multilib\]/,/Include/s/^#//' /etc/pacman.conf
+
+# ── Essential packages ────────────────────────────────────
+info "Installing essential packages..."
+pacman --noconfirm -Syu \
+    grub os-prober efibootmgr \
+    networkmanager dhcpcd \
+    wireless_tools wpa_supplicant \
+    git ntfs-3g btrfs-progs dosfstools dialog terminus-font \
+    zram-generator \
+    || die "Package installation failed."
+
+# ── AMD graphics ──────────────────────────────────────────
+info "Installing AMD graphics drivers..."
+pacman --noconfirm -S \
+    mesa vulkan-radeon vulkan-icd-loader \
+    libva-mesa-driver libva-utils \
+    mesa-utils ocl-icd \
+    || die "GPU driver installation failed."
+
+# ── Services ──────────────────────────────────────────────
+systemctl enable NetworkManager
+systemctl enable fstrim.timer
+
+# ── ZRAM ─────────────────────────────────────────────────
+info "Configuring ZRAM..."
+cat > /etc/systemd/zram-generator.conf << 'EOF'
+[zram0]
+zram-size = ram
+compression-algorithm = zstd
+swap-priority = 100
+fs-type = swap
+EOF
+
+# ── systemd-oomd ──────────────────────────────────────────
+mkdir -p /etc/systemd/oomd.conf.d
+cat > /etc/systemd/oomd.conf.d/custom.conf << 'EOF'
+[OOM]
+DefaultMemoryPressureLimit=60%
+DefaultMemoryPressureDurationSec=20s
+EOF
+systemctl enable systemd-oomd
+ok "ZRAM and OOMD configured."
+
+# ── mkinitcpio ────────────────────────────────────────────
+info "Configuring initramfs..." sed -i 's/^HOOKS=.*/HOOKS=(base udev
+autodetect microcode modconf kms keyboard keymap consolefont block
+filesystems btrfs fsck)/' /etc/mkinitcpio.conf mkinitcpio -P ||
+die "mkinitcpio failed."
+
+# ── GRUB ──────────────────────────────────────────────────
+info "Installing GRUB..."
+echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ArchLinux || die "GRUB install failed."
+grub-mkconfig -o /boot/grub/grub.cfg || die "GRUB config failed."
+ok "GRUB installed."
+
+# ── Locale & timezone ─────────────────────────────────────
+info "Configuring locale and timezone..."
+echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+echo "LANG=en_US.UTF-8"  > /etc/locale.conf
+echo "KEYMAP=fr"          > /etc/vconsole.conf
+locale-gen
+ln -sf /usr/share/zoneinfo/Africa/Algiers /etc/localtime
+hwclock --systohc
+
+# ── Hostname ──────────────────────────────────────────────
+ask "Enter hostname" hostname
+echo "$hostname" > /etc/hostname
+cat > /etc/hosts << EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   ${hostname}.localdomain ${hostname}
+EOF
+
+# ── User ──────────────────────────────────────────────────
+ask "Enter full name" fullname
+ask "Enter username"  username
+useradd -m -c "$fullname" -s /bin/bash "$username" || die "Failed to create user."
+info "Set password for $username:"
+until passwd "$username"; do warn "Try again."; done
+usermod -aG wheel,audio,video,optical,storage,network "$username"
+
+echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/wheel
+chmod 440 /etc/sudoers.d/wheel
+ok "User '$username' created."
+
+# ── Part 3: run as user ───────────────────────────────────
+ai3_path="/home/$username/arch_install3.sh"
+sed '1,/^#part3$/d' /arch_install2.sh > "$ai3_path"
+chown "$username:$username" "$ai3_path"
+chmod +x "$ai3_path"
+su - "$username" -c "/bin/sh $ai3_path"
+rm -f "$ai3_path"
+exit 0
+
+# ════════════════════════════════════════════════════════
+#  PART 3 — user: AUR helper & user-space packages
+# ════════════════════════════════════════════════════════
+#part3
+set -e
+
+Green='\033[0;32m'
+Cyan='\033[1;36m'
+Red='\033[0;31m'
+Yellow='\033[1;33m'
+No='\033[0m'
+
+die()  { echo -e "${Red}[ERROR] $*${No}" >&2; exit 1; }
+info() { echo -e "${Cyan}[*] $*${No}"; }
+ok()   { echo -e "${Green}[✓] $*${No}"; }
+
+# ── Wayland & audio base ──────────────────────────────────
+info "Installing Wayland and audio base..."
+sudo pacman --noconfirm -Syu \
+    wayland wayland-protocols wayland-utils \
+    polkit polkit-gnome \
+    pipewire pipewire-audio pipewire-alsa pipewire-pulse pipewire-jack \
+    alsa-utils wireplumber \
+    noto-fonts gvfs xdg-user-dirs \
+    pciutils usbutils \
+    || die "Failed to install base packages."
+
+xdg-user-dirs-update
+
+# ── yay ───────────────────────────────────────────────────
+info "Installing yay (AUR helper)..."
+cd "$HOME"
+git clone https://aur.archlinux.org/yay-bin.git || die "Failed to clone yay-bin."
+cd yay-bin
+makepkg -si --noconfirm || die "Failed to build yay."
+cd "$HOME"
+rm -rf yay-bin
+ok "yay installed."
+
+ok "Installation complete! Run 'reboot' when ready."
