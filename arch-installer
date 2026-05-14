@@ -161,7 +161,7 @@ sed -i '/\[multilib\]/,/Include/s/^#//' /etc/pacman.conf
 info "Installing essential packages..."
 pacman --noconfirm -Syu \
     grub os-prober efibootmgr \
-    networkmanager dhcpcd \
+    networkmanager network-manager-applet dhcpcd \
     wireless_tools wpa_supplicant \
     git ntfs-3g btrfs-progs dosfstools dialog terminus-font \
     zram-generator \
