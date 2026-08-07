@@ -304,6 +304,7 @@ create_user() {
     info "Set password for $username:"
     until passwd "$username"; do warn "Try again."; done
     usermod -aG wheel,audio,video,optical,storage,network "$username"
+    runuser -l "$username" -c "xdg-user-dirs-update"
 
     ok "User ─ $username ─ Added "
 }
