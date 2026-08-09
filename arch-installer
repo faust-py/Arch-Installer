@@ -80,12 +80,12 @@ clear
 lsblk "$DISK"
 
 read -rp "EFI partition : " EFI_PART
-read -rp "Root partition : " ROOT_PART
+read -rp "Root partition : " LINUX_PART
 
 [[ -b "$EFI_PART" ]] || die "$EFI_PART is not a valid block device."
-[[ -b "$ROOT_PART" ]] || die "$ROOT_PART is not a valid block device."
+[[ -b "$LINUX_PART" ]] || die "$LINUX_PART is not a valid block device."
 
-read -rp "Erase $EFI_PART and $ROOT_PART? [y/N]: " ans
+read -rp "Erase $EFI_PART and $LINUX_PART? [y/N]: " ans
 [[ "$ans" =~ ^[Yy]$ ]] || die "Aborted by user."
 clear
 
@@ -96,15 +96,15 @@ clear
 # Format :
 info "Formatting partitions..."
 mkfs.fat -F32 "$EFI_PART"
-mkfs.btrfs -f "$ROOT_PART"
+mkfs.btrfs -f "$LINUX_PART"
 
 # Mounting :
 ## Linux Partition 
-mount "$ROOT_PART" /mnt
+mount "$LINUX_PART" /mnt
 btrfs subvolume create /mnt/@
 umount /mnt
 BTRFS_OPTS="noatime,compress=zstd,space_cache=v2"
-mount -o "${BTRFS_OPTS},subvol=@" "$ROOT_PART" /mnt
+mount -o "${BTRFS_OPTS},subvol=@" "$LINUX_PART" /mnt
 
 ## EFI Partition 
 mkdir -p /mnt/boot/efi
