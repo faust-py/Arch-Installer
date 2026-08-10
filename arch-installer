@@ -153,8 +153,7 @@ essential_packages() {
 	info "Installing Essential packages..."
 	pacman --noconfirm -S \
 	    grub os-prober efibootmgr \
-	    networkmanager network-manager-applet dhcpcd \
-	    wireless_tools wpa_supplicant \
+	    networkmanager network-manager-applet dhcpcd iwd \
 	    git ntfs-3g btrfs-progs dosfstools dialog terminus-font \
 	    zram-generator
 
