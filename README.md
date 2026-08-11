@@ -11,7 +11,7 @@ Personal script, tailored to my hardware. Read it before running on anything you
 
 - Booted from the [Arch ISO](https://archlinux.org/download/), UEFI mode
 - Internet connection
-- AMD CPU + GPU (edit the package lists in `define_packages()` if not)
+- AMD CPU + GPU (edit the package lists in `package_list()` if not)
 
 ## Usage
 
