@@ -12,32 +12,30 @@ Cyan='\033[1;36m'
 Red='\033[0;31m'
 Yellow='\033[1;33m'
 No='\033[0m'
-
+ 
 # ── Helpers ─────────────────────────────────────────────
 die()  { echo -e "${Red}[ERROR] $*${No}" >&2; exit 1; }
 info() { echo -e "${Cyan}[*] $*${No}"; }
 ok()   { echo -e "${Green}[✓] $*${No}"; }
 warn() { echo -e "${Yellow}[!] $*${No}"; }
-ask()  { read -rp "$1: " "$2"; }
 
-# ── Error / cleanup traps ────────────────────────────────
-on_error() {
-    local exit_code=$? line=$1
-    echo -e "${Red}[ERROR] Command failed (exit $exit_code) at line $line: ${BASH_COMMAND}${No}" >&2
+retry() {
+    local n=1
+    until "$@"; do
+        (( n++ >= 3 )) && die "Failed after 3 attempts: $*"
+        warn "Retrying ($n/3): $*"; sleep 5
+    done
 }
+# ── Error ── 
+on_error() { echo -e "${Red}[ERROR] Command failed (exit $?) at line $1: ${BASH_COMMAND}${No}" >&2; }
 trap 'on_error $LINENO' ERR
-
+# ── Cleanup ──
 cleanup() {
-    local exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        warn "Install failed - unmounting /mnt so you can retry..."
-        if mountpoint -q /mnt/boot/efi 2>/dev/null; then
-            umount -R /mnt/boot/efi 2>/dev/null || true
-        fi
-        if mountpoint -q /mnt 2>/dev/null; then
-            umount -R /mnt 2>/dev/null || true
-        fi
-    fi
+    (( $? != 0 )) || return 0
+    warn "Install failed - unmounting /mnt so you can retry..."
+    mountpoint -q /mnt/boot/efi 2>/dev/null && umount -R /mnt/boot/efi 2>/dev/null
+    mountpoint -q /mnt 2>/dev/null && umount -R /mnt 2>/dev/null
+    true
 }
 trap cleanup EXIT
 
@@ -50,6 +48,12 @@ setfont ter-v32n
 pacman --noconfirm -Syy archlinux-keyring
 loadkeys fr
 timedatectl set-ntp true
+
+# ── Mirror optimization ──
+if command -v reflector &>/dev/null; then
+    info "Ranking mirrors by speed..."
+    reflector --latest 15 --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist || warn "reflector failed, using existing mirrorlist"
+fi
 clear
 
 # ============================================================
@@ -80,7 +84,7 @@ clear
 lsblk "$DISK"
 
 read -rp "EFI partition : " EFI_PART
-read -rp "Root partition : " LINUX_PART
+read -rp "Linux partition : " LINUX_PART
 
 [[ -b "$EFI_PART" ]] || die "$EFI_PART is not a valid block device."
 [[ -b "$LINUX_PART" ]] || die "$LINUX_PART is not a valid block device."
@@ -122,7 +126,7 @@ pacstrap /mnt \
     base base-devel \
     linux-zen linux-zen-headers linux-firmware \
     amd-ucode \
-	vim nano
+    vim nano
 
 genfstab -U /mnt >> /mnt/etc/fstab
 ok "Base installation done."
@@ -132,63 +136,75 @@ clear
 # ============================================================
 # Chroot configuration
 # ============================================================
+# ── Pacman Tweaks ───
+pacman_tweaks() {
+    info "Configuring pacman..."
+    sed -i 's/^#\(Color\)/\1/'                                  /etc/pacman.conf
+    sed -i 's/^#\(VerbosePkgLists\)/\1/'                        /etc/pacman.conf
+    sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 5/'     /etc/pacman.conf
+    sed -i '/\[multilib\]/,/Include/s/^#//'                     /etc/pacman.conf
+    pacman -Syyu
+
+    ok "Pacman Tweaks Done."
+}
+
+# ── Package lists ──
+package_list() {
+    essential_packages=(
+        grub os-prober efibootmgr
+        networkmanager network-manager-applet wpa_supplicant
+        git ntfs-3g btrfs-progs dosfstools dialog terminus-font
+        zram-generator
+    )
+
+    amd_drivers=(
+        mesa vulkan-radeon vulkan-icd-loader
+        libva-mesa-driver libva-utils
+        mesa-utils ocl-icd
+    )
+
+    audio_pkgs=(
+        pipewire pipewire-audio pipewire-alsa pipewire-pulse pipewire-jack
+        alsa-utils wireplumber
+    )
+
+    common_pkgs=(
+        polkit polkit-gnome
+        noto-fonts gvfs xdg-user-dirs
+        pciutils usbutils
+    )
+
+    wayland_pkgs=(
+        wayland wayland-protocols wayland-utils
+    )
+
+    x11_pkgs=(
+        xorg-server xorg-xinit xorg-xkill xorg-xsetroot xorg-xprop xorg-xinput
+    )
+
+    PKGS=("${essential_packages[@]}" "${amd_drivers[@]}" "${common_pkgs[@]}" "${audio_pkgs[@]}")
+}
+
+# ── Display Server ──
+select_display_server() {
+    info "Select your display server:  1) Wayland   2) X11"
+    while true; do
+        read -rp "Choice [1-2]: " c
+        case "$c" in
+            1) PKGS+=("${wayland_pkgs[@]}"); break ;;
+            2) PKGS+=("${x11_pkgs[@]}");     break ;;
+            *) warn "Invalid choice." ;;
+        esac
+    done
+}
 
 # ============================================================
 # Installing Packages
 # ============================================================
-# ── Pacman Tweaks ───
-pacman_tweaks() {
-	info "Configuring pacman..."
-	sed -i 's/^#\(Color\)/\1/'               					/etc/pacman.conf
-	sed -i 's/^#\(VerbosePkgLists\)/\1/'    					/etc/pacman.conf
-	sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 5/' 	/etc/pacman.conf
-	sed -i '/\[multilib\]/,/Include/s/^#//' 					/etc/pacman.conf
-	pacman -Syyu
-
-	ok "Pacman Tweaks Done."
-}
-
-# ── Essential packages ──
-essential_packages() {
-	info "Installing Essential packages..."
-	pacman --noconfirm -S \
-	    grub os-prober efibootmgr \
-	    networkmanager network-manager-applet dhcpcd iwd \
-	    git ntfs-3g btrfs-progs dosfstools dialog terminus-font \
-	    zram-generator
-
-    ok "Installing Essential packages Done."
-	sleep 1
-	clear
-}
-
-# ── AMD graphics ──
-amd_drivers() {
-	info "Installing AMD graphics drivers..."
-	pacman --noconfirm -S \
-	    mesa vulkan-radeon vulkan-icd-loader \
-	    libva-mesa-driver libva-utils \
-	    mesa-utils ocl-icd
-
-    ok "Installing AMD graphics drivers Done."
-	sleep 1
-	clear
-}
-
-# ── Wayland & audio base ──
-wayland_packages() {
-	info "Installing Wayland and audio base..."
-	pacman --noconfirm -S \
-	    wayland wayland-protocols wayland-utils \
-	    polkit polkit-gnome \
-	    pipewire pipewire-audio pipewire-alsa pipewire-pulse pipewire-jack \
-	    alsa-utils wireplumber \
-	    noto-fonts gvfs xdg-user-dirs \
-	    pciutils usbutils
-
-    ok "Installing Wayland and audio base Done."
-	sleep 1
-	clear
+install_packages() {
+    info "Installing ${#PKGS[@]} packages in a single transaction..."
+    retry pacman --noconfirm -S "${PKGS[@]}"
+    ok "Package installation done."
 }
 
 # ============================================================
@@ -196,7 +212,7 @@ wayland_packages() {
 # ============================================================
 # ── ZRAM ──
 setup_zram() {
-	info "Configuring ZRAM..."
+    info "Configuring ZRAM..."
     cat > /etc/systemd/zram-generator.conf << 'EOF'
 [zram0]
 zram-size = 16384
@@ -205,12 +221,12 @@ swap-priority = 100
 fs-type = swap
 EOF
 
-ok "ZRAM configured."
+    ok "ZRAM configured."
 }
 
 # ── Sysctl tuning for zram ──
 setup_sysctl_zram() {
-	info "Configuring sysctl for zram..."
+    info "Configuring sysctl for zram..."
     cat > /etc/sysctl.d/99-vm-zram-parameters.conf << 'EOF'
 vm.swappiness = 180
 vm.watermark_boost_factor = 0
@@ -218,111 +234,122 @@ vm.watermark_scale_factor = 125
 vm.page-cluster = 0
 EOF
  
-ok "Sysctl for zram configured."
+    ok "Sysctl for zram configured."
 }
 
 # ── Systemd-oomd ──
-setup_oomd() {
-	info "Configuring OOMD..."
-    mkdir -p /etc/systemd/oomd.conf.d
-    cat > /etc/systemd/oomd.conf.d/oomd.conf << 'EOF'
-[OOM]
-DefaultMemoryPressureLimit=60%
-DefaultMemoryPressureDurationSec=20s
-EOF
-
-ok "OOMD configured."
-}
+#setup_oomd() {
+#    info "Configuring OOMD..."
+#    mkdir -p /etc/systemd/oomd.conf.d
+#    cat > /etc/systemd/oomd.conf.d/oomd.conf << 'EOF'
+#[OOM]
+#DefaultMemoryPressureLimit=60%
+#DefaultMemoryPressureDurationSec=20s
+#EOF
+#
+#ok "OOMD configured."
+#}
 
 # ── Locale & timezone ──
 setup_locale() {
-	info "Configuring Locale & timezone..."
+    info "Configuring Locale & timezone..."
     echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
     echo "LANG=en_US.UTF-8" > /etc/locale.conf
-	cat > /etc/vconsole.conf <<EOF
+    cat > /etc/vconsole.conf <<EOF
 KEYMAP=fr
 FONT=ter-v32n
 EOF
     locale-gen
     ln -sf /usr/share/zoneinfo/Africa/Algiers /etc/localtime
     hwclock --systohc
-
+ 
     ok "Locale & timezone configured."
 }
 
 # ── Hostname ──
 setup_hostname() {
-	info  "Configuring Hostname..."
-	read -rp "Hostname: " hostname
+    info "Configuring Hostname..."
+    local hostname
+    while true; do
+        read -rp "Hostname: " hostname
+        [[ "$hostname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] && break
+        warn "Invalid hostname (letters/numbers/hyphens only)."
+    done
     echo "$hostname" > /etc/hostname
     cat > /etc/hosts << EOF
 127.0.0.1   localhost
 ::1         localhost
 127.0.1.1   ${hostname}.localdomain ${hostname}
 EOF
-
-ok "Hostname configured."
+ 
+    ok "Hostname configured."
 }
 
 # ── Sudo ──
 setup_sudo() {
-	info  "Configuring Sudo..."
+    info "Configuring Sudo..."
     echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/wheel
     chmod 440 /etc/sudoers.d/wheel
-
+ 
     ok "Sudo configured."
 }
 
 # ── Services ──
 enable_services() {
-	info  "Configuring Services..."
-    systemctl enable NetworkManager  
+    info "Configuring Services..."
+    systemctl enable NetworkManager
     systemctl enable fstrim.timer
-    systemctl enable systemd-oomd
+    #systemctl enable systemd-oomd
     mkinitcpio -P
-
+ 
     ok "Services configured."
 }
 
 # ── GRUB ──
 setup_grub() {
-	info  "Configuring GRUB..."
-    echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
+    info "Configuring GRUB..."
+    if grep -q '^GRUB_DISABLE_OS_PROBER=' /etc/default/grub; then
+        sed -i 's/^GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/' /etc/default/grub
+    else
+        echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
+    fi
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ArchLinux
     grub-mkconfig -o /boot/grub/grub.cfg
-
+ 
     ok "GRUB configured."
 }
 
 # ── User ──
 create_user() {
-	info  "Adding User..."
-    ask "Enter full name" fullname
-    ask "Enter username"  username
+    info "Adding user..."
+    local fullname username
+    read -rp "Enter full name : " fullname
+    while true; do
+        read -rp "Enter username : " username
+        [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && break
+        warn "Invalid username (lowercase, start with letter/underscore)."
+    done
     useradd -m -c "$fullname" -s /bin/bash "$username" || die "Failed to create user."
-    info "Set password for $username:"
     until passwd "$username"; do warn "Try again."; done
     usermod -aG wheel,audio,video,optical,storage,network "$username"
     runuser -l "$username" -c "xdg-user-dirs-update"
-
-    ok "User ─ $username ─ Added "
+    ok "User $username added."
 }
 
 # ============================================================
 # System Install
 # ============================================================
-# ── Install ──
 run_all() {
     set -euo pipefail
     set -o errtrace
-	trap 'die "Chroot step failed (exit $?) at line $LINENO: ${BASH_COMMAND}"' ERR
+    trap 'die "Chroot step failed (exit $?) at line $LINENO: ${BASH_COMMAND}"' ERR
+ 
     pacman_tweaks
-    essential_packages
-    amd_drivers
-    wayland_packages
+    package_list
+    select_display_server
+    install_packages
     setup_zram
-    setup_sysctl_zram
-    setup_oomd
+    #setup_oomd
     setup_hostname
     setup_locale
     setup_sudo
@@ -330,7 +357,7 @@ run_all() {
     setup_grub
     create_user
 }
-
+ 
 arch-chroot /mnt /bin/bash -c "
 Green='$Green'
 Cyan='$Cyan'
